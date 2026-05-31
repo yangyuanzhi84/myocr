@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>光闸数据接收端</title>
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <style>
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            padding: 0; 
+            padding-top: env(safe-area-inset-top);
+            padding-bottom: env(safe-area-inset-bottom);
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); 
+            min-height: 100vh; 
+            margin: 0;
+            color: #fff;
+        }
+        h1 { 
+            text-align: center; 
+            margin: 20px 0 15px; 
+            font-size: 22px; 
+            font-weight: 600;
+        }
+        #reader { 
+            width: 100%; 
+            max-width: 500px; 
+            margin: 0 auto; 
+        }
+        #reader video {
+            border-radius: 12px;
+        }
+        .status-box { 
+            background: rgba(255,255,255,0.1); 
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            padding: 20px; 
+            margin: 15px; 
+            border-radius: 16px;
+        }
+        .status-text { 
+            text-align: center; 
+            color: #ccc; 
+            font-size: 15px; 
+            margin-bottom: 15px;
+        }
+        .progress-bar { 
+            width: 100%; 
+            background: rgba(255,255,255,0.1); 
+            border-radius: 12px; 
+            overflow: hidden; 
+            height: 28px;
+        }
+        .progress-fill { 
+            height: 100%; 
+            background: linear-gradient(90deg, #00ff88, #00cc6a); 
+            width: 0%; 
+            transition: width 0.3s ease; 
+            border-radius: 12px;
+        }
+        .progress-text { 
+            text-align: center; 
+            margin-top: 12px; 
+            color: #00ff88; 
+            font-weight: 600;
+            font-size: 14px;
+        }
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+            font-size: 13px;
+            color: #888;
+        }
+        #result-container { 
+            display: none; 
+            margin: 15px; 
+            background: rgba(255,255,255,0.95);
+            padding: 20px; 
+            border-radius: 16px;
+        }
+        #result-container h3 { 
+            color: #1a1a2e; 
+            margin: 0 0 15px 0; 
+            font-size: 18px;
+        }
+        textarea { 
+            width: 100%; 
+            height: 200px; 
+            padding: 12px; 
+            border: 1px solid #ddd; 
+            border-radius: 8px; 
+            font-size: 14px; 
+            resize: vertical; 
+            font-family: monospace;
+            background: #f5f5f5;
+            color: #333;
+        }
+        .btn { 
+            display: block; 
+            width: 100%; 
+            background: #007aff; 
+            color: white; 
+            border: none; 
+            padding: 14px; 
+            border-radius: 10px; 
+            font-size: 16px; 
+            font-weight: 600; 
+            margin-top: 12px; 
+            cursor: pointer;
+        }
+        .btn:active { opacity: 0.8; }
+        .btn-secondary { background: #34c759; }
+        .btn-outline { background: #f0f0f0; color: #007aff; }
+        .error-box {
+            background: rgba(255,59,48,0.1);
+            border: 1px solid #ff3b30;
+            color: #ff3b30;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 10px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>光闸数据接收端</h1>
+    
+    <div id="reader"></div>
+    
+    <div class="status-box">
+        <div class="status-text" id="status-text">正在初始化摄像头...</div>
+        <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+        <div class="progress-text" id="progress-text">0 / 0 包</div>
+        <div class="info-row">
+            <span id="speed-text">速度: --</span>
+            <span id="eta-text">剩余: --</span>
+        </div>
+        <div class="error-box" id="error-box"></div>
+    </div>
+    
+    <div id="result-container">
+        <h3>传输完成</h3>
+        <textarea id="final-text" readonly></textarea>
+        <button class="btn btn-secondary" onclick="copyText()">复制文本</button>
+        <button class="btn btn-outline" onclick="resetReceiver()">继续接收</button>
+    </div>
+
+    <script>
+    (function() {
+        'use strict';
+
+        let packets = {};
+        let totalPackets = -1;
+        let metadata = null;
+        let receivedSet = new Set();
+        let startTime = null;
+        let html5QrCode = null;
+
+        function initCamera() {
+            updateStatus('正在初始化扫码器...');
+            
+            html5QrCode = new Html5Qrcode("reader");
+            
+            html5QrCode.start(
+                { facingMode: "environment" },
+                { fps: 10, qrbox: { width: 250, height: 250 } },
+                onScanSuccess,
+                onScanFailure
+            ).then(() => {
+                updateStatus('等待扫码...');
+            }).catch(err => {
+                updateStatus('摄像头访问失败: ' + err);
+                showError('请确保已授予摄像头权限，并在HTTPS环境下运行');
+            });
+        }
+
+        function onScanSuccess(text, result) {
+            const regex = /^\[(\d+)\/(\d+)\]\|(.*)/;
+            const match = text.match(regex);
+
+            if (!match) return;
+
+            let currentIdx = parseInt(match[1]);
+            const total = parseInt(match[2]);
+            let payload = match[3];
+            const isMetadata = payload.startsWith('META:');
+
+            if (isMetadata) {
+                payload = payload.substring(5);
+            }
+
+            if (totalPackets === -1) {
+                totalPackets = total;
+                startTime = Date.now();
+                packets = {};
+                receivedSet.clear();
+                console.log('开始接收，共', totalPackets, '个数据包');
+            }
+
+            if (isMetadata && metadata === null) {
+                try {
+                    const metadataJson = atob(payload);
+                    metadata = JSON.parse(metadataJson);
+                    receivedSet.add(0);
+                    console.log('收到元数据:', metadata);
+                    updateProgress();
+                } catch (e) {
+                    console.error('元数据解析失败:', e);
+                }
+                return;
+            }
+
+            const packetIndex = currentIdx;
+            
+            if (!receivedSet.has(packetIndex)) {
+                packets[packetIndex] = payload;
+                receivedSet.add(packetIndex);
+                
+                updateProgress();
+
+                if (receivedSet.size === totalPackets) {
+                    html5QrCode.stop().then(() => {
+                        document.getElementById('reader').style.display = 'none';
+                        updateStatus('集齐完毕，正在解压还原...');
+                        assembleAndDecode();
+                    }).catch(err => console.error('停止摄像头失败:', err));
+                }
+            }
+        }
+
+        function onScanFailure(error) {
+            // 忽略扫描失败
+        }
+
+        function updateProgress() {
+            const received = receivedSet.size;
+            const percent = (received / totalPackets) * 100;
+            
+            document.getElementById('progress-fill').style.width = percent + '%';
+            document.getElementById('progress-text').textContent = `${received} / ${totalPackets} 包`;
+            
+            if (startTime && received > 0) {
+                const elapsed = (Date.now() - startTime) / 1000;
+                const speed = received / elapsed;
+                const remaining = totalPackets - received;
+                const eta = remaining / speed;
+                
+                document.getElementById('speed-text').textContent = `速度: ${speed.toFixed(1)} 包/秒`;
+                document.getElementById('eta-text').textContent = `剩余: ${eta.toFixed(0)} 秒`;
+            }
+            
+            updateStatus(`接收中: ${received} / ${totalPackets} 包`);
+        }
+
+        function updateStatus(text) {
+            document.getElementById('status-text').textContent = text;
+        }
+
+        function showError(text) {
+            const errorBox = document.getElementById('error-box');
+            errorBox.textContent = text;
+            errorBox.style.display = 'block';
+        }
+
+        function assembleAndDecode() {
+            try {
+                updateStatus('正在组装数据...');
+                
+                let fullB64 = '';
+                for (let i = 1; i <= totalPackets; i++) {
+                    if (packets[i]) {
+                        fullB64 += packets[i];
+                    }
+                }
+
+                updateStatus('正在Base64解码...');
+                const binaryString = atob(fullB64);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+
+                updateStatus('正在zlib解压...');
+                const decompressed = pako.inflate(bytes);
+
+                updateStatus('正在解码文本...');
+                let finalText;
+                
+                if (metadata && metadata.binary) {
+                    finalText = '[二进制数据，长度: ' + decompressed.length + ' 字节]';
+                } else {
+                    try {
+                        finalText = new TextDecoder('utf-8').decode(decompressed);
+                    } catch (e) {
+                        finalText = new TextDecoder('gbk', { errors: 'replace' }).decode(decompressed);
+                    }
+                }
+
+                document.getElementById('result-container').style.display = 'block';
+                document.getElementById('final-text').value = finalText;
+                updateStatus('还原成功！');
+                
+                const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+                console.log('传输完成!', '总时间:', totalTime, '秒');
+
+            } catch (err) {
+                console.error('解码失败:', err);
+                showError('数据还原失败: ' + err.message);
+                updateStatus('还原失败');
+            }
+        }
+
+        window.copyText = function() {
+            const textarea = document.getElementById('final-text');
+            textarea.select();
+            textarea.setSelectionRange(0, 99999);
+            
+            if (navigator.clipboard) {
+                navigator.clipboard.writeText(textarea.value).then(() => {
+                    alert('已复制到剪贴板！');
+                }).catch(() => {
+                    document.execCommand('copy');
+                    alert('已复制到剪贴板！');
+                });
+            } else {
+                document.execCommand('copy');
+                alert('已复制到剪贴板！');
+            }
+        };
+
+        window.resetReceiver = function() {
+            packets = {};
+            totalPackets = -1;
+            metadata = null;
+            receivedSet.clear();
+            startTime = null;
+            
+            document.getElementById('result-container').style.display = 'none';
+            document.getElementById('reader').style.display = 'block';
+            document.getElementById('progress-fill').style.width = '0%';
+            document.getElementById('progress-text').textContent = '0 / 0 包';
+            document.getElementById('speed-text').textContent = '速度: --';
+            document.getElementById('eta-text').textContent = '剩余: --';
+            document.getElementById('error-box').style.display = 'none';
+            
+            updateStatus('等待扫码...');
+            initCamera();
+        };
+
+        initCamera();
+    })();
+    </script>
+</body>
+</html>
