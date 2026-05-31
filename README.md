@@ -1,0 +1,2 @@
+# myocr
+provide ocr tech
